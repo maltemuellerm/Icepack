@@ -31,13 +31,13 @@
       use icepack_kinds
       use icepack_parameters, only: p01, p5, c0, c1, c2, c3, c4, c10
       use icepack_parameters, only: bignum, puny, gravit, pi
-      use icepack_tracers, only: nt_fsd
+      use icepack_tracers, only: nt_fsd, tr_brine, nt_fbri
       use icepack_warnings, only: warnstr, icepack_warnings_add
       use icepack_fsd
  
       implicit none
       private
-      public :: icepack_init_wave, icepack_step_wavefracture
+      public :: icepack_init_wave, icepack_step_wavefracture, ww3Boutin_step_wavefracture
 
       real (kind=dbl_kind), parameter  :: &
          swh_minval = 0.01_dbl_kind,  & ! minimum value of wave height (m)
@@ -101,6 +101,8 @@
       do k = 1, nfreq
          wave_spectrum_profile(k) = wave_spectrum_data(k)
       enddo
+      
+      wave_spectrum_profile(:) = c0 !TODO: Nick
 
       ! hardwired for wave coupling with NIWA version of Wavewatch
       ! From Wavewatch, f(n+1) = C*f(n) where C is a constant set by the user
@@ -167,6 +169,173 @@
       WHERE (ABS(d_afsd).lt.puny) d_afsd = c0
 
       end  function get_dafsd_wave
+
+!=======================================================================
+! 
+!  Given ice breaking curvature and wavelength input from WW3,
+!  break large floes.
+!  Adaptation of code in WW3:
+!  https://github.com/NOAA-EMC/WW3/blob/master/model/ftn/w3sis2md.ftn
+!  +
+!  environmental information of ice strength (Karulina et al. 2019)
+!  redistribution of large -> smaller floes when broken (Zhang et al. 2015)
+!
+!  authors: 2020 Nick Szapiro, MET Norway
+      subroutine ww3Boutin_step_wavefracture( &
+                  dt,            ncat,            nfsd,      &
+                  aice,          aicen,           vicen,     &
+                  floe_rad_l,    floe_rad_c,                 &
+                  zBreak,        lBreak,                     &
+                  trcrn,         d_afsd_wave)
+
+      !declare function variables
+      integer (kind=int_kind), intent(in) :: &
+         ncat,         & ! number of thickness categories
+         nfsd            ! number of floe size categories
+      
+      real (kind=dbl_kind), intent(in) :: &
+         dt,           & ! time step
+         aice , & ! ice concentration
+         zBreak, & ! wave-in-ice curvature
+         lBreak ! wavelength of wave-in-ice...lBreak/2 is Dmax if have fracture
+      
+      real (kind=dbl_kind), dimension(ncat), intent(in) :: &
+         aicen , &          ! ice area fraction (categories)
+         vicen           ! ice volume fraction (categories)
+
+      real(kind=dbl_kind), dimension(:), intent(in) ::  &
+         floe_rad_l,   & ! fsd size lower bound in m (radius)
+         floe_rad_c      ! fsd size bin centre in m (radius)
+      
+      real (kind=dbl_kind), dimension(:,:), intent(inout) :: &
+         trcrn           ! tracer array
+
+      real (kind=dbl_kind), dimension(:), intent(out) :: &
+         d_afsd_wave     ! change in fsd due to waves
+      
+      !declare local variables
+      integer (kind=int_kind) :: &  
+         nc, nf, iFloe
+      
+      real (kind=dbl_kind), dimension(nfsd,ncat) :: &
+         d_afsdn_wave    ! change in fsd due to waves, per category
+
+      real (kind=dbl_kind) :: &
+         hbar         , & ! mean ice thickness
+         strainWave    , & ! strain from waves
+         strainCritical, fbri, & ! Critical strain for floe flexural failure
+         betaf         , & ! floe redistribution factor
+         cons_error       ! area conservation error
+
+      real (kind=dbl_kind), dimension (nfsd) :: &
+         afsd_init    , & ! tracer array
+         afsd_tmp     , & ! tracer array
+         d_afsd_tmp       ! change   
+      
+      real (kind=dbl_kind) :: & !, parameter :: &
+         tiltThresh , & != 1.0/2 , & !0.3/2 , & !floes smaller than lBreak*tiltThresh don't fracture but rather tilt in waves
+         nu ,& ! = 0.3 , &  ! Poisson's ratio
+         sigmac ,& ! = 0.27E6 , & ! ice flexural strength
+         FBreak ,& ! = 3.6 , & ! maximum value of the strain / root-mean-square value
+         young ! = 5.49E9   ! Young's modulus
+      
+      !Does floe(h,d) break?
+      !Redistribute area from breaking floe to smaller
+      
+      character(len=*),parameter :: subname='(ww3Boutin_step_wavefracture)'
+
+      !------------------------------------
+
+      ! initialize 
+      d_afsd_wave    (:)   = c0
+      d_afsdn_wave   (:,:) = c0
+      
+      !Uniform "defaults"
+      tiltThresh = 1.0/2
+      nu = 0.3
+      sigmac = 0.27E6
+      Fbreak = 3.6
+      young = 5.49E9
+
+      ! if all ice is not in first floe size category
+      if (.NOT. ALL(trcrn(nt_fsd,:).ge.c1-puny)) then
+ 
+      ! do not try to fracture for minimal ice concentration or zero wave spectrum
+      !if ( (aice > p01).and.(zBreak > puny)) then
+      if ( (aice > puny).and.(zBreak > puny)) then
+
+         !hbar = vice / aice
+         
+         do nc = 1, ncat ! assume fracture has no impact on thickness
+              
+              afsd_init(:) = trcrn(nt_fsd:nt_fsd+nfsd-1,nc)
+
+              ! if there is ice, and a FSD, and not all ice is the smallest floe size 
+              if ((aicen(nc) > puny) .and. (SUM(afsd_init(:)) > puny) &
+                                    .and.     (afsd_init(1) < c1)) then
+
+                 afsd_tmp =  afsd_init
+                 
+                 ! fracture param.
+                 do nf = nfsd,2,-1 !for all but smallest floes
+                   !"small" floes that tilt and not bend when the sea surface is deformed
+                   if (floe_rad_c(nf) .GT. lBreak*tiltThresh) THEN
+                     !wave-induced strain
+                     hbar = vicen(nc)/aicen(nc)
+                     strainWave = FBreak * SQRT( zBreak*0.25*(hbar**2) ) ! in WW3, CURV(IK)*CURVTOSTRAIN
+                     
+                     !ice flexural strength...see Voermans et al. 2020
+                     if (tr_brine) then
+                       fbri = trcrn(nt_fbri,nc) !brine volume fraction
+                       sigmac = 0.5266*EXP(-2.804*SQRT(fbri))
+                       young = 3.1031*EXP(-3.385*SQRT(fbri))
+                     endif
+                     strainCritical = sigmac*(1-nu*nu)/young
+                     
+                     if (strainWave .GT. strainCritical) THEN !floe fractures
+                       !lose area in "large" floe
+                       hbar = afsd_tmp(nf)
+                       afsd_tmp(nf) = afsd_tmp(nf)-hbar
+                       !gain area in smaller bins
+                       do iFloe = 1,nf-1
+                         betaf = ( floe_rad_l(iFloe+1) - floe_rad_l(iFloe) ) / ( floe_rad_l(nf)-floe_rad_l(1) ) !Zhang et al. 2015
+                         afsd_tmp(iFloe) = afsd_tmp(iFloe)+hbar*betaf
+                       end do !iFloe
+                     endif !strainWave
+                   
+                   endif !lBreak
+                 end do !nf
+                 
+                 cons_error = SUM(afsd_tmp) - c1
+
+                  ! area loss: add to first category
+                  if (cons_error.lt.c0) then
+                      afsd_tmp(1) = afsd_tmp(1) - cons_error
+                  else
+                  ! area gain: take it from the largest possible category 
+                    do nf = nfsd, 1, -1
+                     if (afsd_tmp(nf).gt.cons_error) then
+                        afsd_tmp(nf) = afsd_tmp(nf) - cons_error
+                        EXIT
+                     end if
+                    end do
+                  end if
+
+                  ! update trcrn
+                  trcrn(nt_fsd:nt_fsd+nfsd-1,nc) = afsd_tmp/SUM(afsd_tmp)
+                  call icepack_cleanup_fsd (ncat, nfsd, trcrn(nt_fsd:nt_fsd+nfsd-1,:) )
+ 
+                  ! for diagnostics.NOT. ALL(
+                  d_afsdn_wave(:,nc) = afsd_tmp(:) - afsd_init(:)  
+                  d_afsd_wave (:)   = d_afsd_wave(:) + aicen(nc)*d_afsdn_wave(:,nc)
+
+               endif ! aicen > puny
+         enddo    ! nc
+
+      endif          ! aice > p01
+      endif         ! all small floes
+      
+      end subroutine ww3Boutin_step_wavefracture
 
 !=======================================================================
 ! 

@@ -287,6 +287,14 @@
 
          afsd(:) = c0
 
+      else if (.TRUE.) then ! "300m" uniform
+         alpha = 300.0_dbl_kind
+         k = minloc(abs( floe_rad_c-alpha ),DIM=1)
+         afsd(:) = c0
+         afsd(k) = c1
+         write(warnstr,*) 'Initializing afsd to r=', alpha, 'in bin',k,floe_rad_c(k)
+         call icepack_warnings_add(warnstr)
+      
       else            ! Perovich (2014)
  
          ! fraction of ice in each floe size and thickness category

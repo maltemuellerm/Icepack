@@ -52,6 +52,7 @@
       use icepack_itd, only: icepack_init_itd
       use icepack_itd, only: icepack_init_itd_hist
       use icepack_itd, only: icepack_aggregate
+      use icepack_itd, only: cleanup_itd
 
       use icepack_fsd, only: icepack_init_fsd_bounds
       use icepack_fsd, only: icepack_init_fsd
@@ -62,6 +63,7 @@
 
       use icepack_wavefracspec, only: icepack_init_wave
       use icepack_wavefracspec, only: icepack_step_wavefracture
+      use icepack_wavefracspec, only: ww3Boutin_step_wavefracture
 
       use icepack_shortwave, only: icepack_prep_radiation
       use icepack_shortwave, only: icepack_step_radiation
