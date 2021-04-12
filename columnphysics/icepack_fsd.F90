@@ -1053,7 +1053,7 @@
       end do 
 
       subdt = MINVAL(check_dt)
-
+      !print *, 'subdt=',subdt
       end function get_subdt_fsd
 
 
