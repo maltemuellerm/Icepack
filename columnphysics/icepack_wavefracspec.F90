@@ -41,7 +41,8 @@
 
       real (kind=dbl_kind), parameter  :: &
          swh_minval = 0.01_dbl_kind,  & ! minimum value of wave height (m)
-         straincrit = 8.e-5_dbl_kind, & ! critical strain
+         !straincrit = 8.e-5_dbl_kind, & ! critical strain
+         straincrit = 1.6e-4_dbl_kind, & ! critical strain
          D          = 1.e4_dbl_kind,  & ! domain size
          dx         = c1,             & ! domain spacing
          threshold  = c10               ! peak-finding threshold -
@@ -701,7 +702,7 @@
       real (kind=dbl_kind) :: &
          lambda_peak, &   ! 
          lambda_j, &      ! 
-         dlambda
+         dlambda, Young, nu, rhow, rhoi,k_j,Afac,CGwave,CGIwave,Gfac
 
       real (kind=dbl_kind), dimension(nfsd) :: &
          frachistogram 
@@ -710,31 +711,43 @@
          e_stop        ! if true, stop and return zero omega and fsdformed
 
       e_stop = .false. ! if true, aborts fracture calc
-  
+      ! Constants:
+      Young = 5.49E+9 
+      nu    = 0.3
+      rhow  = 1000
+      rhoi  =  920  
       ! Bretschneider Spectrum
       lambda_peak = gravit / (c2*pi*waveFp**2)  ! wavelength(peakfreq)
       lambda_j = c5
       dlambda  = c10
       cg = sqrt(lambda_peak*gravit/c2*pi) 
 
-      !do j = 1, nbret ! nbret=40
-      !   specbret(j) = waveHs**2/(8*pi) * lambda_j/lambda_peak**2 * &
-      !                 EXP(-c1/pi * (lambda_j/lambda_peak)**2)
-      !   lambda(j)   = lambda_j
-      !   lambda_j = lambda_j + dlambda !dlambda = 10
-      !nd do
-      jpeak = nbret
-      do j = 1, nbret 
-          lambda(j)   = lambda_j
-          lambda_j = lambda_j + dlambda !dlambda = 10
-          specbret(j) = c0
-          if ((lambda_peak < lambda_j) .and. & 
-             (lambda_peak > lambda_j-dlambda)) then
-             jpeak = j
-          end if
-      end do
+      do j = 1, nbret ! nbret=40
+        ! Compute factor from Boutin 2018:
+         k_j  = 2*pi/lambda_j 
+         Afac = 1 + ( 4*Young*hbar*pi**4 )/( 3*rhow*9.81* lambda_j**4 *(1-nu**2) )
+         CGwave   = 9.81 * k_j 
+         CGIwave  = 9.81 * k_j +  (Young*hbar**3) / (12*rhow*(1-nu**2) ) * k_j**5
 
-      specbret(jpeak)=(waveHs/2)**2 / (dlambda*2)
+         Gfac = Afac * CGIwave / CGwave 
+         specbret(j) = waveHs**2/(8*pi) * lambda_j/lambda_peak**2 * &
+                       EXP(-c1/pi * (lambda_j/lambda_peak)**2)
+         specbret(j) = 1 / Gfac *specbret(j)
+         lambda(j)   = lambda_j
+         lambda_j = lambda_j + dlambda !dlambda = 10
+      end do
+      !jpeak = nbret
+      !do j = 1, nbret 
+      !    lambda(j)   = lambda_j
+      !    lambda_j = lambda_j + dlambda !dlambda = 10
+      !    specbret(j) = c0
+      !    if ((lambda_peak < lambda_j) .and. & 
+      !       (lambda_peak > lambda_j-dlambda)) then
+      !       jpeak = j
+      !    end if
+      !end do
+
+      !specbret(jpeak)=(waveHs/2)**2 / (dlambda*2)
       !print *,'lambda ',jpeak,lambda_peak
                   
       ! spatial domain
